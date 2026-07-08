@@ -1,0 +1,26 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add Truma iNet X",
+        "description": "Select the Truma panel to add.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "confirm": {
+        "description": "Do you want to add the Truma panel {name}?"
+      }
+    },
+    "abort": {
+      "no_devices_found": "No Truma iNet X panels found. Make sure the panel is powered on and in Bluetooth range.",
+      "already_configured": "This Truma panel is already configured."
+    }
+  },
+  "exceptions": {
+    "control_not_ready": {
+      "message": "Truma BLE control is not available yet (transport is wired in a later build stage)."
+    }
+  }
+}
