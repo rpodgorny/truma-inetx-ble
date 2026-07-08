@@ -21,6 +21,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 
+from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -72,7 +73,7 @@ class TrumaBleClient:
         disconnected_callback: Callable[[BleakClientWithServiceCache], None]
         | None = None,
     ) -> None:
-        """Establish the connection and subscribe to notifications."""
+        """Establish the connection (via HA's stack) and subscribe."""
         self._loop = asyncio.get_running_loop()
         self._client = await establish_connection(
             BleakClientWithServiceCache,
@@ -80,7 +81,34 @@ class TrumaBleClient:
             ble_device.address,
             disconnected_callback=disconnected_callback,
         )
-        # Subscribe on CMD (transport acks) and DATA_R (data frames) only.
+        await self._subscribe()
+
+    async def connect_raw(
+        self,
+        address: str,
+        adapter: str,
+        disconnected_callback: Callable[[BleakClient], None] | None = None,
+    ) -> None:
+        """Connect on a dedicated adapter via raw bleak, bypassing HA's stack.
+
+        Used when a weak dongle (e.g. a CSR8510 clone) cannot scan and connect
+        concurrently: the dongle is dedicated to connecting here while another
+        adapter does HA's scanning, so there is no scan/connect contention.
+        """
+        self._loop = asyncio.get_running_loop()
+        client = BleakClient(
+            address,
+            adapter=adapter,
+            disconnected_callback=disconnected_callback,
+            timeout=20.0,
+        )
+        await client.connect()
+        self._client = client
+        await self._subscribe()
+
+    async def _subscribe(self) -> None:
+        """Enable notifications on CMD (transport acks) and DATA_R (data)."""
+        assert self._client is not None
         await self._client.start_notify(CHAR_CMD, self._notify_cmd)
         await self._client.start_notify(CHAR_DATA_R, self._notify_data)
         _LOGGER.debug("Truma BLE connected and subscribed")

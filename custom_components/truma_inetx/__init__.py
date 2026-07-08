@@ -6,7 +6,7 @@ from homeassistant.components import bluetooth
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 
-from .const import LOGGER
+from .const import CONF_ADAPTER, LOGGER
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
 
 PLATFORMS: list[Platform] = [
@@ -23,10 +23,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> boo
     """Set up Truma iNet X from a config entry."""
     address: str = entry.data[CONF_ADDRESS].upper()
 
-    # Not fatal in the scaffolding stage: if the panel is not advertising right
-    # now the entities still register (as unavailable). Stage 2 will treat a
-    # missing connectable device as ConfigEntryNotReady and retry.
-    if bluetooth.async_ble_device_from_address(hass, address, True) is None:
+    # Not fatal: if the panel is not advertising right now the entities still
+    # register (as unavailable) and the session task retries. Skip the check on
+    # the dedicated-adapter path, which does not go through HA's scanner.
+    if entry.data.get(CONF_ADAPTER) is None and (
+        bluetooth.async_ble_device_from_address(hass, address, True) is None
+    ):
         LOGGER.warning(
             "Truma panel %s not currently reachable over BLE; entities will be "
             "unavailable until it is in range",
