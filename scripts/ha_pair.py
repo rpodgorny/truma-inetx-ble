@@ -117,6 +117,8 @@ async def main() -> None:
         dev_path = None
         dev_name = ""
         for path, ifaces in objs.items():
+            if not path.startswith(ADAPTER):
+                continue  # only devices seen on the target adapter
             d = ifaces.get("org.bluez.Device1")
             if not d:
                 continue
