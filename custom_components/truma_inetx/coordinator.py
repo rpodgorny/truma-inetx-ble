@@ -37,6 +37,9 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             update_interval=None,
         )
         self.address = address
+        # Stable identity for entity/device unique IDs. The BLE address rotates
+        # (resolvable private address), so it must NOT be used as identity.
+        self.unique_id = entry.unique_id or address
         self._state = TrumaState()
 
     async def _async_update_data(self) -> TrumaState:
