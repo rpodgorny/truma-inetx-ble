@@ -85,11 +85,20 @@ async def _get_interface(bus: MessageBus, path: str, interface: str):
     return obj.get_interface(interface)
 
 
-def _find_device(objects: dict, *, name: str, address: str) -> str | None:
-    """Return the BlueZ device path matching ``name`` (or ``address``)."""
+def _find_device(
+    objects: dict, *, name: str, address: str, adapter_path: str | None = None
+) -> str | None:
+    """Return the BlueZ device path matching ``name`` (or ``address``).
+
+    When ``adapter_path`` is given, only devices under that adapter are
+    considered, so the bond lands on the adapter HA connects through rather
+    than any adapter that happens to see the panel.
+    """
     address = address.upper()
     name_lc = name.lower()
     for path, ifaces in objects.items():
+        if adapter_path and not path.startswith(f"{adapter_path}/"):
+            continue
         dev = ifaces.get("org.bluez.Device1")
         if not dev:
             continue
@@ -110,7 +119,11 @@ def _is_paired(objects: dict, path: str) -> bool:
 
 
 async def ensure_bonded(
-    name: str, address: str, *, timeout: float = 60.0
+    name: str,
+    address: str,
+    *,
+    adapter_path: str | None = None,
+    timeout: float = 60.0,
 ) -> bool:
     """Ensure the Truma panel is BLE-bonded. Return ``True`` if bonded.
 
@@ -118,6 +131,9 @@ async def ensure_bonded(
     until the panel reports ``Paired`` or ``timeout`` elapses. The caller must
     have prompted the user to put the panel into add-device mode (and to clear
     its device list if it is full).
+
+    ``adapter_path`` (e.g. ``/org/bluez/hci0``) scopes the bond to the adapter
+    HA connects through; when omitted, any adapter that sees the panel is used.
 
     BlueZ transport only. Safe to call when already bonded (returns quickly).
     """
@@ -129,9 +145,11 @@ async def ensure_bonded(
             bus, "/", "org.freedesktop.DBus.ObjectManager"
         )
 
-        # Fast path: already bonded?
+        # Fast path: already bonded (on the connecting adapter)?
         objects = await object_manager.call_get_managed_objects()
-        path = _find_device(objects, name=name, address=address)
+        path = _find_device(
+            objects, name=name, address=address, adapter_path=adapter_path
+        )
         if path and _is_paired(objects, path):
             LOGGER.debug("Truma %s already bonded", name)
             return True
@@ -149,7 +167,9 @@ async def ensure_bonded(
         start = time.monotonic()
         while time.monotonic() - start < timeout:
             objects = await object_manager.call_get_managed_objects()
-            path = _find_device(objects, name=name, address=address)
+            path = _find_device(
+                objects, name=name, address=address, adapter_path=adapter_path
+            )
             if path and _is_paired(objects, path):
                 LOGGER.info("Truma %s bonded", name)
                 return True

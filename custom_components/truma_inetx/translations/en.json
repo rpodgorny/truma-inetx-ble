@@ -22,7 +22,8 @@
     },
     "abort": {
       "no_devices_found": "No Truma iNet X panels found. Make sure the panel is powered on and in Bluetooth range.",
-      "already_configured": "This Truma panel is already configured."
+      "already_configured": "This Truma panel is already configured.",
+      "reconfigure_successful": "Re-paired with the Truma panel successfully."
     }
   },
   "exceptions": {

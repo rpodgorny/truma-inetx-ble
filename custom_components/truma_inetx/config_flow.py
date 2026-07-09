@@ -14,9 +14,14 @@ import voluptuous as vol
 
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
+    async_ble_device_from_address,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
+    ConfigFlow,
+    ConfigFlowResult,
+)
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
 from .const import DOMAIN, LOCAL_NAME_PREFIX, LOGGER
@@ -106,6 +111,15 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Re-pair an already-configured panel (when the bond is lost)."""
+        entry = self._get_reconfigure_entry()
+        self._name = entry.data[CONF_NAME]
+        self._address = entry.data[CONF_ADDRESS]
+        return await self.async_step_pair()
+
     async def async_step_pair(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -113,22 +127,28 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         Shows an instruction step; on submit, drives pairing (fast if the panel
         is already bonded). Re-shows with an error if the bond does not take.
+        Shared by initial setup and reconfigure (re-pair).
         """
         assert self._name is not None and self._address is not None
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
                 bonded = await ensure_bonded(
-                    self._name, self._address, timeout=_PAIR_TIMEOUT
+                    self._name,
+                    self._address,
+                    adapter_path=self._connectable_adapter_path(),
+                    timeout=_PAIR_TIMEOUT,
                 )
             except Exception:  # noqa: BLE001 - surface as a flow error, not a crash
                 LOGGER.exception("Truma pairing error")
                 bonded = False
             if bonded:
-                return self.async_create_entry(
-                    title=self._name,
-                    data={CONF_ADDRESS: self._address, CONF_NAME: self._name},
-                )
+                data = {CONF_ADDRESS: self._address, CONF_NAME: self._name}
+                if self.source == SOURCE_RECONFIGURE:
+                    return self.async_update_reload_and_abort(
+                        self._get_reconfigure_entry(), data_updates=data
+                    )
+                return self.async_create_entry(title=self._name, data=data)
             errors["base"] = "pairing_failed"
 
         return self.async_show_form(
@@ -136,3 +156,22 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"name": self._name},
         )
+
+    def _connectable_adapter_path(self) -> str | None:
+        """BlueZ adapter object path of the connectable route to the panel.
+
+        Scopes pairing to the adapter HA will actually connect through. Returns
+        None for proxy-backed devices (no local BlueZ adapter), in which case
+        pairing falls back to any adapter.
+        """
+        if self._address is None:
+            return None
+        device = async_ble_device_from_address(
+            self.hass, self._address, connectable=True
+        )
+        details = getattr(device, "details", None)
+        if isinstance(details, dict):
+            path = details.get("path")
+            if isinstance(path, str) and path.startswith("/org/bluez/"):
+                return path.rsplit("/", 1)[0]
+        return None
