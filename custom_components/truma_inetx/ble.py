@@ -22,6 +22,7 @@ import logging
 from collections.abc import Callable
 
 from bleak import BleakClient
+from bleak.backends.bluezdbus.client import BleakClientBlueZDBus
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -94,9 +95,13 @@ class TrumaBleClient:
         Used when a weak dongle (e.g. a CSR8510 clone) cannot scan and connect
         concurrently: the dongle is dedicated to connecting here while another
         adapter does HA's scanning, so there is no scan/connect contention.
+
+        Uses the BlueZ backend client directly rather than ``bleak.BleakClient``:
+        inside HA the latter is monkeypatched by habluetooth and rerouted
+        through HA's manager (ignoring ``adapter=``), defeating the adapter pin.
         """
         self._loop = asyncio.get_running_loop()
-        client = BleakClient(
+        client = BleakClientBlueZDBus(
             address,
             adapter=adapter,
             disconnected_callback=disconnected_callback,
