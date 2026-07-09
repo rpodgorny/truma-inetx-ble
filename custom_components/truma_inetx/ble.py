@@ -103,7 +103,7 @@ class TrumaBleClient:
         self._loop = asyncio.get_running_loop()
         client = BleakClientBlueZDBus(
             address,
-            adapter=adapter,
+            bluez={"adapter": adapter},
             disconnected_callback=disconnected_callback,
             timeout=20.0,
         )
