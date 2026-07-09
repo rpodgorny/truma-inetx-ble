@@ -22,12 +22,12 @@ but not hold reconnects. See repo MEMORY.md.
 `async_write` builds MBP_WRITE frames; climate/select/switch/number controls
 change the heater. Validation via `TrumaState.validate_command`.
 
-## Stage 4: In-flow pairing + polish (upstream-readiness) [In Progress]
+## Stage 4: In-flow pairing + polish (upstream-readiness) [Complete — re-validate scoping on target BLE hw]
 Make it user-friendly and upstreamable. Most of this is transport-agnostic and
 buildable/testable now with the current dongle (pairing works at pairing-time;
 only reliable *reconnect* is hardware-gated).
 
-### 4a: Graceful reconnect/backoff + availability [In Progress]
+### 4a: Graceful reconnect/backoff + availability [Complete]
 **Goal**: the session is a good BLE citizen — exponential backoff with a cap,
 resets after a session that actually connected, and an interruptible wait so
 unload is fast. Fixes the adapter-hogging that starved Renogy AND is required
@@ -39,24 +39,29 @@ healthy link (quick reconnect on drop).
 **Tests**: unit-style reasoning + deploy; confirm log shows growing delays and
 Renogy stays healthy with the entry enabled.
 
-### 4b: Config-flow pairing UX [Not Started]
-Discovery → instruction step ("put the panel in add-device mode") → attempt
-bond+verify (retry ~60 s) → success/abort with clear, translated errors. All
-strings in `strings.json`/translations.
+### 4b: Config-flow pairing UX [Complete]
+Discovery/manual → instruction step → bond+verify (retry ~60 s) → create entry,
+with a translated `pairing_failed` error. Strings in `strings.json`/translations.
 
-### 4c: `ensure_bonded()` abstraction + BlueZ impl [Not Started]
-One method that guarantees a bond before the session runs. BlueZ implementation
-now (port the `scripts/ha_pair.py` NoInputNoOutput auto-accept agent via
-dbus-fast); proxy-native pairing drops in later behind the same seam. Also drop
-the `CONF_ADAPTER`/`connect_raw` BlueZ-pinning hack (proxy-incompatible).
+### 4c: `ensure_bonded()` abstraction + BlueZ impl [Complete]
+`pairing.py::ensure_bonded()` guarantees a bond before the entry is created:
+temporary NoInputNoOutput auto-accept BlueZ agent + `Device1.Pair()` loop via
+dbus-fast (ported from `scripts/ha_pair.py`). Scoped to the connectable adapter
+(`adapter_path` from `async_ble_device_from_address(..., connectable=True)`) so
+the bond lands where the integration connects; proxy-native pairing drops in
+behind the same seam. Dropped the `CONF_ADAPTER`/`connect_raw` hack.
 
-### 4d: Live validation on the dongle [Not Started]
-One-shot config-flow pairing test against the panel (clear its bond list first).
-Controlled — no perpetual coordinator loop — so Renogy is undisturbed.
+### 4d: Live validation [Complete]
+Validated on the van via a standalone harness mirroring `ensure_bonded`: agent
+registered, panel matched by NAME across an RPA rotation, `Pair()` bonded it —
+Renogy undisturbed (pairing ran on a separate radio). Surfaced (and fixed) the
+connectable-adapter scoping. Re-validate the scoping on the target BLE hardware.
 
-### 4e: Docs / HACS metadata / polish [Not Started]
-README, HACS manifest/metadata, `strings.json` completeness, optional "re-pair"
-button/service, reconnect/identity docs.
+### 4e: Docs / HACS metadata / polish [Complete]
+`hacs.json` + README (native-integration section: install, pairing, re-pair,
+hardware reality). Re-pair shipped as `async_step_reconfigure` (device →
+Reconfigure) reusing the pairing step — cleaner than a button (shows the
+add-device instructions). Identity persists via `helpers.storage.Store`.
 
 ## Reused (vendored, unchanged) under `truma/`
 - `protocol.py` — TruMessageV3 framing + CBOR (transport-agnostic)

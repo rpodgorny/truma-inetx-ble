@@ -1,3 +1,61 @@
+# Truma iNet X (BLE) — Home Assistant integration
+
+A **native Home Assistant custom integration** (`custom_components/truma_inetx/`)
+for the Truma iNet X Bluetooth panel on a Truma Combi heater. Config-flow setup,
+native entities, in-app pairing — **no MQTT bridge and no external broker**. It
+reuses this repo's reverse-engineered CBOR-over-BLE protocol (TruMessageV3),
+vendored unchanged under `custom_components/truma_inetx/truma/`.
+
+> The rest of this README (below the divider) documents the original **Cerbo GX
+> MQTT bridge**, which the protocol work came from. The two are independent —
+> use the native integration if you run Home Assistant with Bluetooth.
+
+## Status
+
+- ✅ Config flow (Bluetooth discovery + manual), native entities, in-flow **Just
+  Works pairing** and a **Reconfigure ("re-pair")** step.
+- ✅ Live read: climate + temps/modes/flame/voltage once connected.
+- 🔜 Commands (write) — validation is in place; sending is being finalised.
+- ⚠️ **Reliable BLE reconnect depends on your adapter** (see Hardware below).
+
+## Installation (HACS)
+
+1. HACS → ⋮ → **Custom repositories** → add this repo as an **Integration**.
+2. Install **Truma iNet X (BLE)**, then restart Home Assistant.
+
+## Add the panel
+
+Home Assistant auto-discovers the panel (advertised name `Truma iNetX-…`), or add
+it via **Settings → Devices & services → Add integration → Truma iNet X**. The
+flow then walks you through the one-time bond:
+
+1. **Clear the panel's saved Bluetooth device list** (Truma InetX app → Device
+   Manager, or on the panel). A full list silently rejects new bonds.
+2. Put the panel into **add-device / pairing mode** and turn **Bluetooth off on
+   your phone** so the app doesn't take the slot.
+3. Submit. The panel uses **Just Works** pairing (no passkey); it can take up to
+   a minute.
+
+Lost the bond later? Use **device → ⋮ → Reconfigure** to re-pair without removing
+the integration.
+
+## Hardware reality (read this before blaming the integration)
+
+The panel uses a rotating (resolvable private) address and requires a bond. Many
+Linux BlueZ adapters can *pair* but then fail to reliably *reconnect* to it —
+phones work because they use a different BLE stack. If entities keep going
+`unavailable` with connect timeouts, the fix is a better BLE path, not the code:
+
+- an **ESP32 ESPHome Bluetooth Proxy** (phone-like ESP-IDF stack; recommended), or
+- an **RTL8761B** USB dongle.
+
+The integration connects through HA's Bluetooth stack, so either works with no
+config change. Avoid running it on a shared, marginal adapter alongside other BLE
+devices — a failing reconnect loop can starve them (the reconnect uses capped
+exponential backoff to be a good citizen, but capable hardware is the real fix).
+
+---
+
 # Truma iNetX BLE Controller for Cerbo GX
 
 Control a Truma Combi heater via Bluetooth Low Energy from a Victron Cerbo GX, with full Home Assistant integration.
