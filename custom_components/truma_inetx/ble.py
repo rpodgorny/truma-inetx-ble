@@ -107,7 +107,9 @@ class TrumaBleClient:
             disconnected_callback=disconnected_callback,
             timeout=20.0,
         )
-        await client.connect()
+        # pair=False: the panel is already bonded on this adapter; BlueZ uses the
+        # stored bond for encryption on connect.
+        await client.connect(pair=False)
         self._client = client
         await self._subscribe()
 
