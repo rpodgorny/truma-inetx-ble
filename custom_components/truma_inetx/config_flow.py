@@ -1,8 +1,9 @@
 """Config flow for the Truma iNet X (BLE) integration.
 
-Tier 1 assumes the panel has already been BLE-bonded out of band (the panel
-shows a 6-digit passkey; bonding is a one-time BlueZ operation). The flow here
-only records which device to talk to; it does not perform pairing.
+Discovers the panel over Bluetooth, then walks the user through the one-time
+Just Works bond (the panel shows no passkey). The panel uses a rotating
+(resolvable private) BLE address, so the unique_id is keyed on the stable
+advertised name and the address is treated as a mutable connection detail.
 """
 
 from __future__ import annotations
@@ -18,7 +19,12 @@ from homeassistant.components.bluetooth import (
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
-from .const import DOMAIN, LOCAL_NAME_PREFIX
+from .const import DOMAIN, LOCAL_NAME_PREFIX, LOGGER
+from .pairing import ensure_bonded
+
+# How long the pairing step busy-loops Pair() while the panel is in add-device
+# mode before reporting failure.
+_PAIR_TIMEOUT = 60.0
 
 
 class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -31,6 +37,9 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         # keyed by stable device name -> latest advertisement seen
         self._discovered: dict[str, BluetoothServiceInfoBleak] = {}
+        # The panel being added, resolved before the pairing step.
+        self._name: str | None = None
+        self._address: str | None = None
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -53,16 +62,12 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm adding a discovered panel."""
+        """Confirm adding a discovered panel, then pair."""
         assert self._discovery_info is not None
         if user_input is not None:
-            return self.async_create_entry(
-                title=self._discovery_info.name,
-                data={
-                    CONF_ADDRESS: self._discovery_info.address,
-                    CONF_NAME: self._discovery_info.name,
-                },
-            )
+            self._name = self._discovery_info.name
+            self._address = self._discovery_info.address
+            return await self.async_step_pair()
         self._set_confirm_only()
         return self.async_show_form(
             step_id="confirm",
@@ -78,10 +83,9 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
             info = self._discovered[name]
             await self.async_set_unique_id(name, raise_on_progress=False)
             self._abort_if_unique_id_configured(updates={CONF_ADDRESS: info.address})
-            return self.async_create_entry(
-                title=name,
-                data={CONF_ADDRESS: info.address, CONF_NAME: name},
-            )
+            self._name = name
+            self._address = info.address
+            return await self.async_step_pair()
 
         configured_names = self._async_current_ids()
         for info in async_discovered_service_info(self.hass):
@@ -100,4 +104,35 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {vol.Required(CONF_ADDRESS): vol.In(sorted(self._discovered))}
             ),
+        )
+
+    async def async_step_pair(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Perform the one-time Just Works bond with the panel.
+
+        Shows an instruction step; on submit, drives pairing (fast if the panel
+        is already bonded). Re-shows with an error if the bond does not take.
+        """
+        assert self._name is not None and self._address is not None
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                bonded = await ensure_bonded(
+                    self._name, self._address, timeout=_PAIR_TIMEOUT
+                )
+            except Exception:  # noqa: BLE001 - surface as a flow error, not a crash
+                LOGGER.exception("Truma pairing error")
+                bonded = False
+            if bonded:
+                return self.async_create_entry(
+                    title=self._name,
+                    data={CONF_ADDRESS: self._address, CONF_NAME: self._name},
+                )
+            errors["base"] = "pairing_failed"
+
+        return self.async_show_form(
+            step_id="pair",
+            errors=errors,
+            description_placeholders={"name": self._name},
         )
