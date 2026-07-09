@@ -39,7 +39,12 @@ from .truma.state import TrumaState
 
 type TrumaConfigEntry = ConfigEntry[TrumaCoordinator]
 
-_RECONNECT_DELAY = 15  # seconds
+# Reconnect backoff. Start quick (a healthy link that just dropped should come
+# back fast) and grow exponentially to a cap when the panel stays unreachable,
+# so an out-of-range/unbonded device does not hammer — and monopolize — the
+# shared Bluetooth adapter. The delay resets after any session that connected.
+_RECONNECT_DELAY_BASE = 15  # seconds
+_RECONNECT_DELAY_MAX = 300  # seconds (5 min cap)
 _STORAGE_VERSION = 1
 
 
@@ -70,6 +75,9 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         self._identity: dict | None = None
         self._store: Store = Store(hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}")
         self._stop = False
+        # Set on stop to interrupt the reconnect wait immediately (so unload is
+        # not blocked for up to the full backoff delay).
+        self._stop_event = asyncio.Event()
 
     async def _async_update_data(self) -> TrumaState:
         """Return the current shared state (updated by BLE notifications)."""
@@ -85,6 +93,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
     async def async_stop(self) -> None:
         """Stop the session and disconnect."""
         self._stop = True
+        self._stop_event.set()
         if self._client is not None:
             await self._client.disconnect()
 
@@ -101,19 +110,41 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         return data
 
     async def _run(self) -> None:
-        """Maintain the BLE session, reconnecting on failure."""
+        """Maintain the BLE session, reconnecting with exponential backoff."""
+        delay = _RECONNECT_DELAY_BASE
         while not self._stop:
+            connected = False
             try:
-                await self._connect_and_run()
+                connected = await self._connect_and_run()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("Truma session ended: %s", exc)
             self._mark_disconnected()
             if self._stop:
                 break
-            await asyncio.sleep(_RECONNECT_DELAY)
+            # A session that actually connected resets the backoff (a healthy
+            # link that just dropped should return fast); a failed attempt grows
+            # it after the wait, so a persistently unreachable panel backs off
+            # the shared adapter instead of hammering it.
+            if connected:
+                delay = _RECONNECT_DELAY_BASE
+            LOGGER.debug("Truma %s reconnecting in %ss", self.unique_id, delay)
+            await self._wait_before_retry(delay)
+            if not connected:
+                delay = min(delay * 2, _RECONNECT_DELAY_MAX)
 
-    async def _connect_and_run(self) -> None:
-        """Connect, run startup, then hold the connection until it drops."""
+    async def _wait_before_retry(self, delay: float) -> None:
+        """Sleep ``delay`` seconds, but wake immediately on stop."""
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+        except TimeoutError:
+            pass
+
+    async def _connect_and_run(self) -> bool:
+        """Connect, run startup, then hold until the link drops.
+
+        Returns ``True`` once the connection was established (so the caller
+        resets the backoff). Raises if the connection could not be established.
+        """
         assert self._identity is not None
         client = TrumaBleClient(self._identity)
         client.on_data(self._on_frame)
@@ -142,6 +173,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
 
         while not self._stop and client.connected:
             await asyncio.sleep(1)
+        return True
 
     async def _run_startup(self, client: TrumaBleClient) -> None:
         """Register, subscribe to all topics, send identity, discover params."""
