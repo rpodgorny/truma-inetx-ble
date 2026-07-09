@@ -21,8 +21,6 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-from bleak import BleakClient
-from bleak.backends.bluezdbus.client import BleakClientBlueZDBus
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -82,35 +80,6 @@ class TrumaBleClient:
             ble_device.address,
             disconnected_callback=disconnected_callback,
         )
-        await self._subscribe()
-
-    async def connect_raw(
-        self,
-        address: str,
-        adapter: str,
-        disconnected_callback: Callable[[BleakClient], None] | None = None,
-    ) -> None:
-        """Connect on a dedicated adapter via raw bleak, bypassing HA's stack.
-
-        Used when a weak dongle (e.g. a CSR8510 clone) cannot scan and connect
-        concurrently: the dongle is dedicated to connecting here while another
-        adapter does HA's scanning, so there is no scan/connect contention.
-
-        Uses the BlueZ backend client directly rather than ``bleak.BleakClient``:
-        inside HA the latter is monkeypatched by habluetooth and rerouted
-        through HA's manager (ignoring ``adapter=``), defeating the adapter pin.
-        """
-        self._loop = asyncio.get_running_loop()
-        client = BleakClientBlueZDBus(
-            address,
-            bluez={"adapter": adapter},
-            disconnected_callback=disconnected_callback,
-            timeout=20.0,
-        )
-        # pair=False: the panel is already bonded on this adapter; BlueZ uses the
-        # stored bond for encryption on connect.
-        await client.connect(pair=False)
-        self._client = client
         await self._subscribe()
 
     async def _subscribe(self) -> None:

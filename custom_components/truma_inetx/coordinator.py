@@ -20,7 +20,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .ble import TrumaBleClient
-from .const import CONF_ADAPTER, DOMAIN, LOGGER
+from .const import DOMAIN, LOGGER
 from .truma.const import (
     CTRL_MBP,
     DEV_APP_DEFAULT,
@@ -68,8 +68,6 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # Stable identity for entity/device unique IDs. The BLE address rotates
         # (resolvable private address), so it must NOT be used as identity.
         self.unique_id = entry.unique_id or address
-        # Optional dedicated adapter (raw bleak) for weak-dongle setups.
-        self._adapter: str | None = entry.data.get(CONF_ADAPTER)
         self._state = TrumaState()
         self._client: TrumaBleClient | None = None
         self._identity: dict | None = None
@@ -149,19 +147,12 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         client = TrumaBleClient(self._identity)
         client.on_data(self._on_frame)
 
-        if self._adapter:
-            # Dedicated-adapter path: connect via raw bleak on self._adapter,
-            # which HA must NOT be scanning (avoids CSR-clone scan/connect clash).
-            await client.connect_raw(self.address.upper(), self._adapter)
-        else:
-            ble_device = bluetooth.async_ble_device_from_address(
-                self.hass, self.address.upper(), connectable=True
-            )
-            if ble_device is None:
-                raise HomeAssistantError(
-                    f"Truma {self.address} not reachable over BLE"
-                )
-            await client.connect(ble_device)
+        ble_device = bluetooth.async_ble_device_from_address(
+            self.hass, self.address.upper(), connectable=True
+        )
+        if ble_device is None:
+            raise HomeAssistantError(f"Truma {self.address} not reachable over BLE")
+        await client.connect(ble_device)
         self._client = client
 
         await self._run_startup(client)
