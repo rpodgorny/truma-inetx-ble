@@ -34,6 +34,7 @@ from .truma.protocol import (
     build_register_frame,
     build_subscribe_frame,
     build_v3_frame,
+    build_write_frame,
 )
 from .truma.state import TrumaState
 
@@ -245,13 +246,21 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
     async def async_write(self, topic: str, param: str, value: int) -> None:
         """Validate and send a parameter write to the panel/heater.
 
-        Enabled in Stage 3; for now surface a clear error so controls do not
-        silently no-op while the read-only session is being validated.
+        The panel confirms by pushing an updated value, which flows back through
+        the normal notification path and updates the entity.
         """
         ok, msg = TrumaState.validate_command(topic, param, value)
         if not ok:
             raise HomeAssistantError(f"Invalid Truma command: {msg}")
-        raise HomeAssistantError(
-            "Truma control is not enabled yet (read-only stage); commands land "
-            "in the next stage."
-        )
+
+        client = self._client
+        if client is None or not client.connected:
+            raise HomeAssistantError("Truma panel is not connected")
+
+        dest = TrumaState.get_command_dest(topic)
+        frame = build_write_frame(client.assigned_addr, dest, topic, param, value)
+        LOGGER.debug("Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest)
+        if not await client.send(frame):
+            raise HomeAssistantError(
+                f"Truma did not acknowledge write {topic}.{param}={value}"
+            )
