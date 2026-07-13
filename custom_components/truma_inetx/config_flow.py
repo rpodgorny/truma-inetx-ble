@@ -134,6 +134,7 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 bonded = await ensure_bonded(
+                    self.hass,
                     self._name,
                     self._address,
                     adapter_path=self._connectable_adapter_path(),

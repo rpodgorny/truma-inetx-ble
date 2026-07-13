@@ -11,16 +11,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from bleak.backends.device import BLEDevice
-from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .ble import TrumaBleClient
+from .bt import async_resolve_proxy_device
 from .const import DOMAIN, LOGGER
 from .truma.const import (
     CTRL_MBP,
@@ -28,7 +26,6 @@ from .truma.const import (
     DEV_HEATER,
     DEV_PANEL,
     MBP_PARAM_DISC,
-    SERVICE_UUID,
     TOPIC_BATCHES,
 )
 from .truma.protocol import (
@@ -49,15 +46,6 @@ type TrumaConfigEntry = ConfigEntry[TrumaCoordinator]
 _RECONNECT_DELAY_BASE = 15  # seconds
 _RECONNECT_DELAY_MAX = 300  # seconds (5 min cap)
 _STORAGE_VERSION = 1
-
-
-def _is_remote_scanner(scanner: object) -> bool:
-    """Return True for a remote (e.g. ESP32 proxy) scanner, not a local adapter."""
-    try:
-        from habluetooth import BaseHaRemoteScanner
-    except ImportError:  # pragma: no cover - habluetooth always present in HA
-        return False
-    return isinstance(scanner, BaseHaRemoteScanner)
 
 
 class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
@@ -159,7 +147,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         client = TrumaBleClient(self._identity)
         client.on_data(self._on_frame)
 
-        ble_device = self._resolve_ble_device()
+        ble_device = async_resolve_proxy_device(self.hass, self.unique_id)
         if ble_device is None:
             raise HomeAssistantError(
                 f"Truma {self.unique_id} not currently advertising"
@@ -177,74 +165,6 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         while not self._stop and client.connected:
             await asyncio.sleep(1)
         return True
-
-    def _resolve_ble_device(self) -> BLEDevice | None:
-        """Find the panel's current connectable device, preferring a proxy.
-
-        The panel uses a Resolvable Private Address that rotates, so a stored
-        MAC goes stale: match on the stable advertised name to find the current
-        address. Local host adapters cannot maintain a connection to a
-        rotating-RPA peer, so prefer a device reached through a remote (e.g.
-        ESP32 proxy) scanner. Fall back to any connectable device, then to the
-        stored address.
-        """
-        # The panel's RPA rotates fast, so several of its recent addresses may
-        # still be cached and most are stale — connecting to a stale RPA just
-        # times out. Gather every current advert for this panel (across all
-        # scanners; in add-device/pairing mode the local name may be absent, so
-        # also match the primary service UUID) and try them freshest-first,
-        # preferring a device reachable through a remote (ESP32 proxy) scanner
-        # since local host adapters cannot maintain a rotating-RPA link.
-        infos = [
-            info
-            for info in bluetooth.async_discovered_service_info(
-                self.hass, connectable=False
-            )
-            if info.name == self.unique_id or SERVICE_UUID in info.service_uuids
-        ]
-        # A proxy that holds the bond exposes the panel's stable IDENTITY
-        # address too (whose last bytes match the name suffix, e.g. "...FFB4D1").
-        # Detect it so we can EXCLUDE it below — connecting to that resolved
-        # identity dials a stale cached bonded RPA rather than the live one.
-        suffix = self.unique_id.rsplit("-", 1)[-1].upper()
-        if len(suffix) != 6 or any(c not in "0123456789ABCDEF" for c in suffix):
-            suffix = ""
-
-        def _is_identity(address: str) -> bool:
-            return bool(suffix) and address.replace(":", "").upper().endswith(suffix)
-
-        # Connecting to the "resolved identity" pseudo-address dials a STALE
-        # bonded RPA (a proxy quirk), while the raw current RPA is what actually
-        # connects through the proxy — so exclude the identity and target the
-        # freshest raw RPA.
-        rpas = [i for i in infos if not _is_identity(i.address)]
-        rpas.sort(key=lambda i: i.time, reverse=True)
-        LOGGER.debug(
-            "Truma %s candidates (fresh→stale RPAs): %s | identity present: %s",
-            self.unique_id,
-            [(i.address, round(i.time, 1), i.rssi, i.connectable) for i in rpas],
-            any(_is_identity(i.address) for i in infos),
-        )
-
-        # Connect ONLY through a remote/proxy scanner. Local host adapters
-        # cannot maintain this rotating-RPA link (BlueZ pairs but can't
-        # reconnect), and if allowed to they steal the connection from the
-        # proxy and then drop it — so when no proxy route is available right
-        # now, return None and retry rather than fall back to a local adapter.
-        for info in rpas:
-            for sd in bluetooth.async_scanner_devices_by_address(
-                self.hass, info.address, connectable=True
-            ):
-                if _is_remote_scanner(sd.scanner):
-                    LOGGER.debug(
-                        "Truma %s -> %s via remote/proxy scanner (rssi=%s)",
-                        self.unique_id,
-                        info.address,
-                        getattr(sd.advertisement, "rssi", None),
-                    )
-                    return sd.ble_device
-        LOGGER.debug("Truma %s: no proxy route to the panel right now", self.unique_id)
-        return None
 
     async def _run_startup(self, client: TrumaBleClient) -> None:
         """Register, subscribe to all topics, send identity, discover params."""

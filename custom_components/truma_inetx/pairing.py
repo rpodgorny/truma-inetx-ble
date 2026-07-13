@@ -5,15 +5,18 @@ client is *actively* attempting to pair AND the panel is in add-device mode. It
 also silently rejects new bonds when its stored device list is full, so the user
 must clear that list first if pairing fails repeatedly.
 
-``ensure_bonded()`` hides that behind one call. Today it drives **BlueZ over
-D-Bus** (a faithful port of ``scripts/ha_pair.py``: register a NoInputNoOutput
-auto-accept agent, then busy-loop ``Device1.Pair()`` until the device reports
-``Paired``). When connecting through an ESP32 Bluetooth proxy the bond lives on
-the proxy instead — that implementation slots in behind this same function, so
-nothing else in the integration needs to know which transport bonded the panel.
+``ensure_bonded()`` hides that behind one call and dispatches by transport:
 
-NOTE: the BlueZ path here is not yet validated end-to-end against the panel from
-inside HA (Stage 4d) — it is the porting of a proven standalone script.
+* **Bluetooth proxy** (``_ensure_bonded_proxy``) — connect through an ESP32
+  ESPHome ``bluetooth_proxy`` with bleak and ``pair()``, then verify the bond
+  by accessing a protected characteristic. This is the reliable path for this
+  fast-rotating-RPA panel (BlueZ can pair it but cannot GATT-reconnect it), and
+  the one validated end-to-end against the real panel.
+* **Local BlueZ** (``_ensure_bonded_bluez``) — a faithful port of
+  ``scripts/ha_pair.py``: register a NoInputNoOutput auto-accept agent, then
+  busy-loop ``Device1.Pair()`` until the device reports ``Paired``. Kept for a
+  future ESP-less (direct local-adapter) setup; not yet validated end-to-end
+  from inside HA against a capable adapter.
 """
 
 from __future__ import annotations
@@ -21,16 +24,114 @@ from __future__ import annotations
 import asyncio
 import time
 
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from dbus_fast import BusType, Variant
 from dbus_fast.aio import MessageBus
 from dbus_fast.service import ServiceInterface, method
+from homeassistant.core import HomeAssistant
 
+from .bt import async_resolve_proxy_device
 from .const import LOGGER
+from .truma.const import CHAR_CMD
 
 BLUEZ = "org.bluez"
 _AGENT_PATH = "/truma_inetx/agent"
 _PAIR_CALL_TIMEOUT = 8.0
 _POLL_INTERVAL = 1.0
+
+
+# --- transport dispatch ----------------------------------------------------
+
+
+async def ensure_bonded(
+    hass: HomeAssistant,
+    name: str,
+    address: str,
+    *,
+    adapter_path: str | None = None,
+    timeout: float = 60.0,
+) -> bool:
+    """Ensure the Truma panel is BLE-bonded, over whichever transport reaches it.
+
+    Prefers a Bluetooth proxy (the reliable path for this fast-rotating-RPA
+    panel that local BlueZ cannot GATT-reconnect); falls back to direct local
+    BlueZ when no proxy route is available (e.g. an ESP-less setup). The caller
+    must have prompted the user to put the panel into add-device mode (and to
+    clear its device list if it is full). Returns ``True`` if bonded. Safe to
+    call when already bonded.
+    """
+    # A proxy setup surfaces the panel through a remote scanner within a couple
+    # of seconds of it advertising in add-device mode; probe briefly for that.
+    probe_deadline = time.monotonic() + min(8.0, timeout / 2)
+    while time.monotonic() < probe_deadline:
+        if async_resolve_proxy_device(hass, name) is not None:
+            return await _ensure_bonded_proxy(hass, name, timeout=timeout)
+        await asyncio.sleep(1.0)
+    LOGGER.debug("Truma %s: no Bluetooth proxy route; using local BlueZ pairing", name)
+    return await _ensure_bonded_bluez(
+        name, address, adapter_path=adapter_path, timeout=timeout
+    )
+
+
+# --- Bluetooth-proxy pairing (bleak) ---------------------------------------
+
+
+def _noop_notify(_sender: object, _data: bytearray) -> None:
+    """Discard notifications during the pairing bond test."""
+
+
+async def _ensure_bonded_proxy(
+    hass: HomeAssistant, name: str, *, timeout: float = 60.0
+) -> bool:
+    """Bond via a Bluetooth proxy: connect with bleak, ``pair()``, then verify.
+
+    The proxy encrypts lazily, so pair()/encrypt first, then confirm the bond
+    took by subscribing to a protected characteristic (a CCCD write only
+    succeeds on an encrypted link). Retries while the panel is in add-device
+    mode until ``timeout``.
+    """
+    deadline = time.monotonic() + timeout
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        device = async_resolve_proxy_device(hass, name)
+        if device is None:
+            await asyncio.sleep(1.5)
+            continue
+        client: BleakClientWithServiceCache | None = None
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache, device, device.address, max_attempts=1
+            )
+            for _ in range(3):
+                try:
+                    await client.pair()
+                except Exception as exc:  # noqa: BLE001 - not all paths need it
+                    LOGGER.debug("Truma %s proxy pair(): %s", name, exc)
+                try:
+                    # A protected CCCD write only lands on an encrypted (bonded)
+                    # link — success here means the bond took.
+                    await client.start_notify(CHAR_CMD, _noop_notify)
+                    await client.stop_notify(CHAR_CMD)
+                    LOGGER.info("Truma %s bonded via proxy", name)
+                    return True
+                except Exception as exc:  # noqa: BLE001 - retry through encrypt race
+                    last_exc = exc
+                    await asyncio.sleep(1.5)
+        except Exception as exc:  # noqa: BLE001 - transient connect failures
+            last_exc = exc
+            LOGGER.debug("Truma %s proxy connect: %s", name, exc)
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception as exc:  # noqa: BLE001 - best effort
+                    LOGGER.debug("Truma %s proxy disconnect: %s", name, exc)
+        await asyncio.sleep(2.0)
+    LOGGER.warning("Truma %s: proxy pairing timed out (%s)", name, last_exc)
+    return False
+
+
+# --- local BlueZ pairing (D-Bus) — kept for a future ESP-less setup ---------
 
 
 class _JustWorksAgent(ServiceInterface):
@@ -118,14 +219,14 @@ def _is_paired(objects: dict, path: str) -> bool:
     return bool(paired and paired.value)
 
 
-async def ensure_bonded(
+async def _ensure_bonded_bluez(
     name: str,
     address: str,
     *,
     adapter_path: str | None = None,
     timeout: float = 60.0,
 ) -> bool:
-    """Ensure the Truma panel is BLE-bonded. Return ``True`` if bonded.
+    """Bond the Truma panel over local BlueZ (D-Bus). Return ``True`` if bonded.
 
     Registers a temporary Just Works agent and busy-loops ``Device1.Pair()``
     until the panel reports ``Paired`` or ``timeout`` elapses. The caller must
