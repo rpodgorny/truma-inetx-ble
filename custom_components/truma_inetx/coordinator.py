@@ -222,39 +222,29 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         LOGGER.debug(
             "Truma %s candidates (fresh→stale RPAs): %s | identity present: %s",
             self.unique_id,
-            [(i.address, round(i.time, 1), i.connectable) for i in rpas],
+            [(i.address, round(i.time, 1), i.rssi, i.connectable) for i in rpas],
             any(_is_identity(i.address) for i in infos),
         )
 
-        # Freshest raw RPA via a remote/proxy scanner (a local adapter cannot
-        # maintain a rotating-RPA link).
+        # Connect ONLY through a remote/proxy scanner. Local host adapters
+        # cannot maintain this rotating-RPA link (BlueZ pairs but can't
+        # reconnect), and if allowed to they steal the connection from the
+        # proxy and then drop it — so when no proxy route is available right
+        # now, return None and retry rather than fall back to a local adapter.
         for info in rpas:
             for sd in bluetooth.async_scanner_devices_by_address(
                 self.hass, info.address, connectable=True
             ):
                 if _is_remote_scanner(sd.scanner):
                     LOGGER.debug(
-                        "Truma %s -> %s via remote/proxy scanner",
+                        "Truma %s -> %s via remote/proxy scanner (rssi=%s)",
                         self.unique_id,
                         info.address,
+                        getattr(sd.advertisement, "rssi", None),
                     )
                     return sd.ble_device
-        # Otherwise the freshest connectable raw RPA on any scanner.
-        for info in rpas:
-            device = bluetooth.async_ble_device_from_address(
-                self.hass, info.address, connectable=True
-            )
-            if device is not None:
-                LOGGER.debug(
-                    "Truma %s -> %s via local scanner", self.unique_id, info.address
-                )
-                return device
-        # Nothing advertising right now; use the config-flow-maintained address.
-        address = self.config_entry.data.get(CONF_ADDRESS, self.address).upper()
-        LOGGER.debug("Truma %s -> fallback stored %s", self.unique_id, address)
-        return bluetooth.async_ble_device_from_address(
-            self.hass, address, connectable=True
-        )
+        LOGGER.debug("Truma %s: no proxy route to the panel right now", self.unique_id)
+        return None
 
     async def _run_startup(self, client: TrumaBleClient) -> None:
         """Register, subscribe to all topics, send identity, discover params."""

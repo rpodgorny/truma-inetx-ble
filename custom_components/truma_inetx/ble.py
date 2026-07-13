@@ -83,23 +83,33 @@ class TrumaBleClient:
         await self._subscribe()
 
     async def _subscribe(self) -> None:
-        """Enable notifications, pairing on demand only if the link needs it.
+        """Establish encryption, then enable notifications.
 
-        The panel's characteristics require an encrypted link. When not yet
-        bonded the first CCCD write fails, so we bond (Just Works, while the
-        panel is in add-device mode) and retry. Once bonded, the link encrypts
-        automatically on reconnect and the first attempt succeeds — so we must
-        NOT pair again, as re-pairing an already-bonded link makes the panel
-        drop the connection mid-startup.
+        The panel's characteristics require an encrypted link. The proxy only
+        encrypts on first *protected access*, so a bare CCCD write races ahead
+        of encryption and fails (status 5 = insufficient auth when unbonded,
+        status 15 = insufficient encryption on a bonded reconnect) — and the
+        proxy tears the connection down on that failed write. So pair/encrypt
+        FIRST (when already bonded this just re-establishes encryption), then
+        subscribe, retrying briefly to absorb the encryption-setup delay.
         """
-        try:
-            await self._start_notifications()
-        except Exception as exc:  # noqa: BLE001 - expected pre-bond (auth error)
-            _LOGGER.debug("Truma subscribe failed (%s); pairing and retrying", exc)
-            assert self._client is not None
-            await self._client.pair()
-            await self._start_notifications()
-        _LOGGER.debug("Truma BLE connected and subscribed")
+        assert self._client is not None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                await self._client.pair()
+            except Exception as exc:  # noqa: BLE001 - some backends bond out-of-band
+                _LOGGER.debug("Truma pair()/encrypt attempt %d: %s", attempt, exc)
+            try:
+                await self._start_notifications()
+                _LOGGER.debug("Truma BLE connected and subscribed")
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                _LOGGER.debug("Truma subscribe attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(1.5)
+        if last_exc is not None:
+            raise last_exc
 
     async def _start_notifications(self) -> None:
         """Subscribe to CMD (transport acks) and DATA_R (data) notifications."""
