@@ -1,4 +1,7 @@
 # BLE UUIDs (all share base -F3B2-11E8-8EB2-F2801F1B9FD1)
+# Primary service; advertised even in add-device/pairing mode (when the local
+# name may be absent), so it is the most reliable key to find the panel.
+SERVICE_UUID = "fc310002-f3b2-11e8-8eb2-f2801f1b9fd1"
 CHAR_CMD = "fc314001-f3b2-11e8-8eb2-f2801f1b9fd1"
 CHAR_DATA_W = "fc314002-f3b2-11e8-8eb2-f2801f1b9fd1"
 CHAR_DATA_R = "fc314003-f3b2-11e8-8eb2-f2801f1b9fd1"

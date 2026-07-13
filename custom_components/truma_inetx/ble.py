@@ -83,11 +83,29 @@ class TrumaBleClient:
         await self._subscribe()
 
     async def _subscribe(self) -> None:
-        """Enable notifications on CMD (transport acks) and DATA_R (data)."""
+        """Enable notifications, pairing on demand only if the link needs it.
+
+        The panel's characteristics require an encrypted link. When not yet
+        bonded the first CCCD write fails, so we bond (Just Works, while the
+        panel is in add-device mode) and retry. Once bonded, the link encrypts
+        automatically on reconnect and the first attempt succeeds — so we must
+        NOT pair again, as re-pairing an already-bonded link makes the panel
+        drop the connection mid-startup.
+        """
+        try:
+            await self._start_notifications()
+        except Exception as exc:  # noqa: BLE001 - expected pre-bond (auth error)
+            _LOGGER.debug("Truma subscribe failed (%s); pairing and retrying", exc)
+            assert self._client is not None
+            await self._client.pair()
+            await self._start_notifications()
+        _LOGGER.debug("Truma BLE connected and subscribed")
+
+    async def _start_notifications(self) -> None:
+        """Subscribe to CMD (transport acks) and DATA_R (data) notifications."""
         assert self._client is not None
         await self._client.start_notify(CHAR_CMD, self._notify_cmd)
         await self._client.start_notify(CHAR_DATA_R, self._notify_data)
-        _LOGGER.debug("Truma BLE connected and subscribed")
 
     async def disconnect(self) -> None:
         """Disconnect the BLE link."""
