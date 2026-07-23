@@ -59,6 +59,10 @@ SENSORS: tuple[TrumaSensorDescription, ...] = (
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        # The panel reports millivolts, so we can show 2 decimals. Set the
+        # display precision explicitly: the VOLTAGE device class otherwise
+        # defaults to whole volts and hides the decimals we actually have.
+        suggested_display_precision=2,
         entity_registry_enabled_default=False,
         value_fn=lambda s: (
             None if s.voltage_vcc12 is None else round(s.voltage_vcc12 / 1000.0, 2)
