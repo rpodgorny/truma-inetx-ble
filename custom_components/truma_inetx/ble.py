@@ -204,7 +204,12 @@ class TrumaBleClient:
             # 4. Wait for DataAck.
             try:
                 await asyncio.wait_for(self._transport_event.wait(), _ACK_TIMEOUT)
-                if self._transport_ack and self._transport_ack[0] == TRANSPORT_ACK:
+                # DataAck (0xF0) or MsgAck (0x83) both mean the panel took the
+                # frame — heater-routed writes reply MsgAck, panel writes DataAck.
+                if self._transport_ack and self._transport_ack[0] in (
+                    TRANSPORT_ACK,
+                    TRANSPORT_MSG_ACK,
+                ):
                     success = True
             except TimeoutError:
                 _LOGGER.debug("Truma transport: timeout waiting for DataAck")
