@@ -9,6 +9,8 @@ module is the single source of that resolution.
 
 from __future__ import annotations
 
+from collections.abc import Container
+
 from bleak.backends.device import BLEDevice
 
 from homeassistant.components import bluetooth
@@ -27,7 +29,9 @@ def is_remote_scanner(scanner: object) -> bool:
     return isinstance(scanner, BaseHaRemoteScanner)
 
 
-def async_resolve_proxy_device(hass: HomeAssistant, name: str) -> BLEDevice | None:
+def async_resolve_proxy_device(
+    hass: HomeAssistant, name: str, *, avoid: Container[str] = ()
+) -> BLEDevice | None:
     """Find the panel's current connectable device via a remote/proxy scanner.
 
     Matches the panel by its stable advertised ``name`` OR primary service UUID
@@ -41,6 +45,20 @@ def async_resolve_proxy_device(hass: HomeAssistant, name: str) -> BLEDevice | No
     The "resolved identity" pseudo-address (whose last bytes match the name
     suffix, e.g. ``...FFB4D1``) is excluded — connecting it dials a stale cached
     bonded RPA rather than the live one.
+
+    ``avoid`` is a set of RPA addresses to skip. This exists because of a
+    specific, observed failure mode after pairing:
+
+    Right after the bond, the panel keeps *advertising* the RPA it paired on
+    but stops *accepting connections* on it (a panel-side phantom from the
+    pairing hand-off), while it simultaneously advertises a fresh, live RPA.
+    Both addresses look equally valid here — same name, both connectable via the
+    proxy, near-identical timestamps — but connecting the dead one fails
+    forever with ESP_GATT_CONN_FAIL_ESTABLISH (0x3e). Without ``avoid`` we
+    always return the same first candidate and the coordinator hammers the dead
+    address indefinitely, leaving the device "unavailable" until someone
+    power-cycles the panel. The coordinator feeds back each address that failed
+    to establish so we rotate to the panel's other advertised RPA instead.
     """
     infos = [
         info
@@ -54,15 +72,21 @@ def async_resolve_proxy_device(hass: HomeAssistant, name: str) -> BLEDevice | No
     def _is_identity(address: str) -> bool:
         return bool(suffix) and address.replace(":", "").upper().endswith(suffix)
 
+    avoid_norm = {a.upper() for a in avoid}
     rpas = [i for i in infos if not _is_identity(i.address)]
     rpas.sort(key=lambda i: i.time, reverse=True)
     LOGGER.debug(
-        "Truma %s candidates (fresh→stale RPAs): %s | identity present: %s",
+        "Truma %s candidates (fresh→stale RPAs): %s | avoid: %s | identity present: %s",
         name,
         [(i.address, round(i.time, 1), i.rssi, i.connectable) for i in rpas],
+        sorted(avoid_norm),
         any(_is_identity(i.address) for i in infos),
     )
     for info in rpas:
+        # Skip an address the coordinator has told us won't establish (the
+        # post-pairing phantom RPA described above), so we try the next one.
+        if info.address.upper() in avoid_norm:
+            continue
         for sd in bluetooth.async_scanner_devices_by_address(
             hass, info.address, connectable=True
         ):
