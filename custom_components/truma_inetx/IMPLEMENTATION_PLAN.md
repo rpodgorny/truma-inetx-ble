@@ -63,6 +63,48 @@ hardware reality). Re-pair shipped as `async_step_reconfigure` (device →
 Reconfigure) reusing the pairing step — cleaner than a button (shows the
 add-device instructions). Identity persists via `helpers.storage.Store`.
 
+## Stage 5: Resilience + UX hardening for public release [In Progress]
+**Goal**: survive real-world churn without a manual panel power-cycle, and guide
+the user through the failure modes we hit during dev.
+
+### 5a: Data-stall watchdog [Complete]
+The hold loop could sit in a half-open link (`client.connected` True, no frames)
+forever, showing stale data — the state that forced a power-cycle. Now the
+coordinator tracks the last-frame loop-clock time (seeded on connect, refreshed
+in `_on_frame`) and, if no frame arrives for `_DATA_STALL_TIMEOUT` (90 s), drops
+the link and reconnects. Panel pushes ~25 frames/min, so 90 s of silence is
+unambiguously dead — no false trips.
+
+### 5b: Deterministic client teardown [Complete]
+`_run` now tears the client down in a `finally` (new `_disconnect_client`) on
+every attempt, and the client is tracked *before* connecting — so a stall, a
+failed connect, or a partial connect never leaves a half-open link holding the
+proxy's connection slot (the ghost that needed a power-cycle). `async_stop`
+routes through the same helper.
+
+### 5c: Re-pair UX for the proxy stale-bond case (reason=97) [Complete]
+Onboarding strings now tell the user that when re-pairing through an ESP32 proxy
+they must also clear the proxy's stored bonds (its **Clear BLE bonds** button),
+not just the panel's list — the previously-confusing dead end. Button added to
+the proxy YAML (`truma-bt-proxy.yaml`).
+
+### 5d: Phantom-RPA rotation [Complete — pending live re-validation]
+Observed live (2026-07-16): after pairing on one RPA, the panel keeps
+advertising that address but stops accepting connections on it, while
+advertising a fresh live RPA. The resolver always returned that first (dead)
+address — same name, cached connectable route — so the coordinator hammered it
+with ESP_GATT_CONN_FAIL_ESTABLISH (0x3e) forever and the device stayed
+unavailable until a panel power-cycle. Fix: `async_resolve_proxy_device` takes
+an `avoid` set; the coordinator adds any address whose *connect* fails and
+rotates to the next advertised RPA, clearing on success or when every candidate
+is exhausted (so nothing wedges permanently). This is the last known cause of
+the post-pairing power-cycle.
+
+### 5e: Live re-validation of the full onboarding [Not Started]
+Re-run clean onboarding end-to-end and deliberately re-trigger the phantom-RPA
+state to prove the coordinator now recovers on its own (no power-cycle), then
+confirm the watchdog/teardown handle steady-state drops.
+
 ## Reused (vendored, unchanged) under `truma/`
 - `protocol.py` — TruMessageV3 framing + CBOR (transport-agnostic)
 - `const.py` — device IDs, control/MBP types, char UUIDs, topic batches

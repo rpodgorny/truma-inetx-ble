@@ -45,6 +45,11 @@ type TrumaConfigEntry = ConfigEntry[TrumaCoordinator]
 # shared Bluetooth adapter. The delay resets after any session that connected.
 _RECONNECT_DELAY_BASE = 15  # seconds
 _RECONNECT_DELAY_MAX = 300  # seconds (5 min cap)
+# A healthy panel pushes frames every few seconds. If a connection goes quiet
+# for this long the link is wedged (half-open, or a ghost the proxy has not
+# noticed): drop it and reconnect rather than sit "connected" forever with
+# stale data. This is what recovers the session without a manual power-cycle.
+_DATA_STALL_TIMEOUT = 90  # seconds
 _STORAGE_VERSION = 1
 
 
@@ -71,6 +76,18 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         self._state = TrumaState()
         self._client: TrumaBleClient | None = None
         self._identity: dict | None = None
+        # Loop-clock timestamp of the last frame received; drives the stall
+        # watchdog in the hold loop. Set on connect, refreshed on every frame.
+        self._last_frame: float = 0.0
+        # RPA addresses that failed to establish a connection, so the resolver
+        # rotates to another advertised address instead of hammering a dead one
+        # (see the phantom-RPA explanation in bt.async_resolve_proxy_device).
+        # Cleared on a successful connection and when it would block every
+        # candidate, so a transiently-bad address gets retried later.
+        self._avoid: set[str] = set()
+        # Address of the most recent connection attempt, so _run knows which
+        # one to blame if the attempt fails.
+        self._last_addr: str | None = None
         self._store: Store = Store(hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}")
         self._stop = False
         # Set on stop to interrupt the reconnect wait immediately (so unload is
@@ -92,8 +109,21 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         """Stop the session and disconnect."""
         self._stop = True
         self._stop_event.set()
-        if self._client is not None:
-            await self._client.disconnect()
+        await self._disconnect_client()
+
+    async def _disconnect_client(self) -> None:
+        """Disconnect and drop the current BLE client, best effort.
+
+        Frees the proxy connection slot so the next attempt starts clean.
+        """
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception as exc:  # noqa: BLE001 - teardown must not raise
+            LOGGER.debug("Truma %s disconnect: %s", self.unique_id, exc)
 
     async def _load_identity(self) -> dict:
         """Load the persisted app identity, or create and store a new one."""
@@ -116,6 +146,17 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 connected = await self._connect_and_run()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("Truma session ended: %s", exc)
+                # If the attempt never got a link up, banish that address so the
+                # resolver rotates to another advertised RPA next round instead
+                # of hammering a post-pairing phantom (see bt.py). Only a failed
+                # *connect* leaves _last_addr set; a later failure clears it.
+                if self._last_addr:
+                    self._avoid.add(self._last_addr)
+            finally:
+                # Always tear the client down before the next attempt so a
+                # half-open link never lingers holding the proxy's connection
+                # slot (the ghost that otherwise needs a manual power-cycle).
+                await self._disconnect_client()
             self._mark_disconnected()
             if self._stop:
                 break
@@ -125,6 +166,9 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             # the shared adapter instead of hammering it.
             if connected:
                 delay = _RECONNECT_DELAY_BASE
+                # A real connection means our address set is healthy; forget any
+                # past failures so a later reconnect starts from a clean slate.
+                self._avoid.clear()
             LOGGER.debug("Truma %s reconnecting in %ss", self.unique_id, delay)
             await self._wait_before_retry(delay)
             if not connected:
@@ -146,14 +190,34 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         assert self._identity is not None
         client = TrumaBleClient(self._identity)
         client.on_data(self._on_frame)
+        # Track the client before connecting so a failed/partial connect is
+        # still torn down by _run's finally (freeing the proxy slot).
+        self._client = client
 
-        ble_device = async_resolve_proxy_device(self.hass, self.unique_id)
+        ble_device = async_resolve_proxy_device(
+            self.hass, self.unique_id, avoid=self._avoid
+        )
+        if ble_device is None and self._avoid:
+            # Every address we know about has failed to establish. Rather than
+            # stay stuck reporting "not advertising", forget the failures and
+            # start over — the phantom may have cleared, or the panel may have
+            # rotated back to a usable RPA.
+            LOGGER.debug(
+                "Truma %s: all candidates avoided; clearing and retrying",
+                self.unique_id,
+            )
+            self._avoid.clear()
+            ble_device = async_resolve_proxy_device(self.hass, self.unique_id)
         if ble_device is None:
             raise HomeAssistantError(
                 f"Truma {self.unique_id} not currently advertising"
             )
+        self._last_addr = ble_device.address
         await client.connect(ble_device)
-        self._client = client
+        # The connection established, so this address is not the phantom —
+        # clear the blame marker so a later failure (startup, a mid-session
+        # drop) does not wrongly banish a perfectly good address.
+        self._last_addr = None
 
         await self._run_startup(client)
 
@@ -162,8 +226,18 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         self.async_set_updated_data(self._state)
         LOGGER.info("Truma %s connected and subscribed", self.unique_id)
 
+        # Hold the connection, watching for a data stall. Startup just delivered
+        # frames, so seed the watchdog from now.
+        self._last_frame = self.hass.loop.time()
         while not self._stop and client.connected:
             await asyncio.sleep(1)
+            if self.hass.loop.time() - self._last_frame > _DATA_STALL_TIMEOUT:
+                LOGGER.warning(
+                    "Truma %s: no data for %ss; link is stale, reconnecting",
+                    self.unique_id,
+                    _DATA_STALL_TIMEOUT,
+                )
+                break
         return True
 
     async def _run_startup(self, client: TrumaBleClient) -> None:
@@ -198,6 +272,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
     @callback
     def _on_frame(self, parsed: dict) -> None:
         """Handle a decoded V3 frame and update state."""
+        # Any frame proves the link is alive; feed the stall watchdog.
+        self._last_frame = self.hass.loop.time()
         control = parsed.get("control_raw")
         sub_type = parsed.get("sub_type")
         cbor = parsed.get("cbor")
