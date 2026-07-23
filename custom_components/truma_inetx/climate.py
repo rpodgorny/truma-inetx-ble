@@ -61,7 +61,9 @@ class TrumaClimate(TrumaEntity, ClimateEntity):
     @property
     def target_temperature(self) -> float | None:
         """Target room temperature."""
-        return TrumaState.wire_to_celsius(self.data.room_target_temp)
+        # Live setpoint lives on the heater (AirHeating), not the panel mirror
+        # (RoomClimate.TgtTemp only echoes our own writes). Matches current_temp.
+        return TrumaState.wire_to_celsius(self.data.air_target_temp)
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -88,5 +90,5 @@ class TrumaClimate(TrumaEntity, ClimateEntity):
         """Set the target room temperature."""
         temperature = kwargs[ATTR_TEMPERATURE]
         await self.coordinator.async_write(
-            "RoomClimate", "TgtTemp", int(round(temperature * 10))
+            "AirHeating", "TgtTemp", int(round(temperature * 10))
         )
