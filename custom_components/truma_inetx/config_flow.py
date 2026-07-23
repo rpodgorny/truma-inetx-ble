@@ -56,6 +56,16 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
         mutable connection detail. This collapses the per-address discovery
         flows into one and keeps the stored address fresh on rediscovery.
         """
+        # A service-UUID matcher also routes here, so an advertisement can
+        # arrive before HA has resolved the panel's name — leaving only the
+        # ephemeral (rotating) address. Skip those so we surface a single,
+        # correctly-named discovery instead of a second card titled with the
+        # raw MAC. A name-carrying advertisement follows shortly and keys the
+        # flow properly.
+        if not discovery_info.name or not discovery_info.name.startswith(
+            LOCAL_NAME_PREFIX
+        ):
+            return self.async_abort(reason="awaiting_name")
         await self.async_set_unique_id(discovery_info.name)
         self._abort_if_unique_id_configured(
             updates={CONF_ADDRESS: discovery_info.address}
