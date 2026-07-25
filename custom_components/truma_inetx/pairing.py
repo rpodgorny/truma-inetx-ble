@@ -92,9 +92,22 @@ async def _ensure_bonded_proxy(
     """
     deadline = time.monotonic() + timeout
     last_exc: Exception | None = None
+    # The panel advertises a post-pairing PHANTOM RPA alongside the live one:
+    # same name, both proxy-reachable, near-identical timestamps, but the phantom
+    # never completes a bond (0x3e on connect, or error 97 / "insufficient
+    # authentication" on the protected write). The resolver returns the freshest
+    # first, so without feedback we'd re-pick and hammer the phantom until
+    # timeout. Track addresses that failed and skip them so we rotate to the
+    # live RPA — the same avoid-rotation the coordinator uses for reconnect.
+    avoid: set[str] = set()
     while time.monotonic() < deadline:
-        device = async_resolve_proxy_device(hass, name)
+        device = async_resolve_proxy_device(hass, name, avoid=avoid)
         if device is None:
+            # Every candidate has failed at least once (or none advertised yet).
+            # Clear the avoid set so previously-failed addresses get another try
+            # rather than stalling — a phantom can heal, and the live RPA may
+            # only just have appeared.
+            avoid.clear()
             await asyncio.sleep(1.5)
             continue
         client: BleakClientWithServiceCache | None = None
@@ -126,6 +139,9 @@ async def _ensure_bonded_proxy(
                     await client.disconnect()
                 except Exception as exc:  # noqa: BLE001 - best effort
                     LOGGER.debug("Truma %s proxy disconnect: %s", name, exc)
+        # This address didn't bond (connect failed, or 3 encrypt/verify tries
+        # failed) — avoid it and let the resolver hand us the panel's other RPA.
+        avoid.add(device.address.upper())
         await asyncio.sleep(2.0)
     LOGGER.warning("Truma %s: proxy pairing timed out (%s)", name, last_exc)
     return False
