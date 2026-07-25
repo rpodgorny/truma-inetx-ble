@@ -82,6 +82,18 @@ class TrumaBleClient:
         )
         await self._subscribe()
 
+    async def adopt(self, client: BleakClientWithServiceCache) -> None:
+        """Take over an already-connected client (handed off from pairing).
+
+        The config-flow bond leaves a live, encrypted connection; reusing it for
+        the session avoids the disconnect-then-reconnect that wedges the panel's
+        just-bonded RPA (the "needs a power-cycle" bug). The caller must have
+        verified the client is still connected. Subscribes on the live link.
+        """
+        self._loop = asyncio.get_running_loop()
+        self._client = client
+        await self._subscribe()
+
     async def _subscribe(self) -> None:
         """Establish encryption, then enable notifications.
 

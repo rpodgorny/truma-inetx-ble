@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from bleak_retry_connector import BleakClientWithServiceCache
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -59,9 +60,18 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
     config_entry: TrumaConfigEntry
 
     def __init__(
-        self, hass: HomeAssistant, entry: TrumaConfigEntry, address: str
+        self,
+        hass: HomeAssistant,
+        entry: TrumaConfigEntry,
+        address: str,
+        initial_client: BleakClientWithServiceCache | None = None,
     ) -> None:
-        """Initialize the coordinator (push model, no polling interval)."""
+        """Initialize the coordinator (push model, no polling interval).
+
+        ``initial_client`` is a live, encrypted connection handed off from a
+        just-completed pairing; the first session adopts it instead of
+        reconnecting (which wedges the just-bonded RPA). Consumed once.
+        """
         super().__init__(
             hass,
             LOGGER,
@@ -70,6 +80,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             update_interval=None,
         )
         self.address = address
+        self._initial_client = initial_client
         # Stable identity for entity/device unique IDs. The BLE address rotates
         # (resolvable private address), so it must NOT be used as identity.
         self.unique_id = entry.unique_id or address
@@ -194,6 +205,33 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # still torn down by _run's finally (freeing the proxy slot).
         self._client = client
 
+        # First attempt after a fresh pairing: adopt the live connection the
+        # config flow handed off, instead of reconnecting. This is what avoids
+        # the post-pairing RPA wedge — never disconnect the bonded link.
+        initial = self._initial_client
+        self._initial_client = None  # consume: adopt only once
+        if initial is not None:
+            if initial.is_connected:
+                LOGGER.debug(
+                    "Truma %s: adopting handed-off pairing connection %s",
+                    self.unique_id,
+                    initial.address,
+                )
+                self._last_addr = None
+                await client.adopt(initial)
+                return await self._finish_startup(client)
+            # Handed-off link dropped in the setup gap — discard and connect
+            # fresh below.
+            LOGGER.debug(
+                "Truma %s: handed-off connection was already closed; "
+                "connecting fresh",
+                self.unique_id,
+            )
+            try:
+                await initial.disconnect()
+            except Exception as exc:  # noqa: BLE001 - best effort
+                LOGGER.debug("Truma %s stale handoff disconnect: %s", self.unique_id, exc)
+
         ble_device = async_resolve_proxy_device(
             self.hass, self.unique_id, avoid=self._avoid
         )
@@ -219,6 +257,14 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # drop) does not wrongly banish a perfectly good address.
         self._last_addr = None
 
+        return await self._finish_startup(client)
+
+    async def _finish_startup(self, client: TrumaBleClient) -> bool:
+        """Run startup on a connected client, then hold until the link drops.
+
+        Shared by the fresh-connect and adopted-handoff paths. Returns ``True``
+        (the connection is up, so the caller resets the backoff).
+        """
         await self._run_startup(client)
 
         self._state.connected = True

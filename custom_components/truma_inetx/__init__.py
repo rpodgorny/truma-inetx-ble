@@ -6,7 +6,7 @@ from homeassistant.components import bluetooth
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 
-from .const import LOGGER
+from .const import DOMAIN, LOGGER
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
 
 PLATFORMS: list[Platform] = [
@@ -32,7 +32,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> boo
             address,
         )
 
-    coordinator = TrumaCoordinator(hass, entry, address)
+    # A just-completed pairing hands off its live, encrypted connection here so
+    # the session adopts it instead of reconnecting (which wedges the RPA).
+    initial_client = hass.data.get(DOMAIN, {}).get("pending_clients", {}).pop(
+        address, None
+    )
+
+    coordinator = TrumaCoordinator(hass, entry, address, initial_client=initial_client)
     await coordinator.async_config_entry_first_refresh()
     await coordinator.async_start()
     entry.runtime_data = coordinator

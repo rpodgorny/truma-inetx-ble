@@ -143,7 +143,7 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                bonded = await ensure_bonded(
+                bonded, client = await ensure_bonded(
                     self.hass,
                     self._name,
                     self._address,
@@ -152,8 +152,15 @@ class TrumaConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except Exception:  # noqa: BLE001 - surface as a flow error, not a crash
                 LOGGER.exception("Truma pairing error")
-                bonded = False
+                bonded, client = False, None
             if bonded:
+                if client is not None:
+                    # Hand the live pairing connection to the coordinator that
+                    # async_setup_entry is about to create, so the session runs
+                    # on it instead of reconnecting (which wedges the RPA).
+                    self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                        "pending_clients", {}
+                    )[self._address.upper()] = client
                 data = {CONF_ADDRESS: self._address, CONF_NAME: self._name}
                 if self.source == SOURCE_RECONFIGURE:
                     return self.async_update_reload_and_abort(
