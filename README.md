@@ -1,22 +1,21 @@
-# Truma iNet X (BLE) — Home Assistant integration
+# Truma iNet X (BLE) — protocol research
 
-A **native Home Assistant custom integration** (`custom_components/truma_inetx/`)
-for the Truma iNet X Bluetooth panel on a Truma Combi heater. Config-flow setup,
-native entities, in-app pairing — **no MQTT bridge and no external broker**. It
-reuses this repo's reverse-engineered CBOR-over-BLE protocol (TruMessageV3),
-vendored unchanged under `custom_components/truma_inetx/truma/`.
+> ## ➡️ The Home Assistant integration has moved
+>
+> It now lives in its own repository:
+> **https://github.com/rpodgorny/hass-truma-inetx**
+>
+> `custom_components/truma_inetx/` was removed from this repo on 2026-07-26 so
+> there is exactly one home for it. Install it from there (HACS custom
+> repository); file integration issues there too.
+>
+> What remains here is the research material it grew out of: the
+> reverse-engineered CBOR-over-BLE protocol (TruMessageV3), the original Cerbo
+> GX MQTT bridge, hardware/diagnostic scripts and
+> `docs/IMPLEMENTATION_PLAN.md`.
 
 > The rest of this README (below the divider) documents the original **Cerbo GX
-> MQTT bridge**, which the protocol work came from. The two are independent —
-> use the native integration if you run Home Assistant with Bluetooth.
-
-## Status
-
-- ✅ Config flow (Bluetooth discovery + manual), native entities, in-flow **Just
-  Works pairing** and a **Reconfigure ("re-pair")** step.
-- ✅ Live read: climate + temps/modes/flame/voltage once connected.
-- 🔜 Commands (write) — validation is in place; sending is being finalised.
-- ⚠️ **Reliable BLE reconnect depends on your adapter** (see Hardware below).
+> MQTT bridge**, which the protocol work came from.
 
 ## Installation (HACS)
 
