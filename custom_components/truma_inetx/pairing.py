@@ -11,7 +11,9 @@ must clear that list first if pairing fails repeatedly.
   ESPHome ``bluetooth_proxy`` with bleak and ``pair()``, then verify the bond
   by accessing a protected characteristic. This is the reliable path for this
   fast-rotating-RPA panel (BlueZ can pair it but cannot GATT-reconnect it), and
-  the one validated end-to-end against the real panel.
+  the one validated end-to-end against the real panel. Re-pairing needs no
+  clean-up on the proxy and so works on stock proxy firmware — see the
+  ``avoid`` rotation in ``_ensure_bonded_proxy``.
 * **Local BlueZ** (``_ensure_bonded_bluez``) — a faithful port of
   ``scripts/ha_pair.py``: register a NoInputNoOutput auto-accept agent, then
   busy-loop ``Device1.Pair()`` until the device reports ``Paired``. Kept for a
@@ -131,6 +133,14 @@ async def _ensure_bonded_proxy(
                 try:
                     await client.pair()
                 except Exception as exc:  # noqa: BLE001 - not all paths need it
+                    # "error: 97" here means the panel has forgotten a bond the
+                    # proxy still holds (its device list was cleared, or rolled
+                    # our entry out of its ~4 slots). Nothing to do about it on
+                    # this address — the panel drops the link the instant it
+                    # rejects the bond. The avoid-rotation below is the cure:
+                    # the panel's next RPA is one the proxy holds no bond for,
+                    # so pairing there is clean. Measured twice on the van
+                    # (2026-07-26): rejected, rotated, bonded, ~9s total.
                     LOGGER.debug("Truma %s proxy pair(): %s", name, exc)
                 try:
                     # A protected CCCD write only lands on an encrypted (bonded)
@@ -148,7 +158,7 @@ async def _ensure_bonded_proxy(
         except Exception as exc:  # noqa: BLE001 - transient connect failures
             last_exc = exc
             LOGGER.debug("Truma %s proxy connect: %s", name, exc)
-        # This address didn't bond (connect failed, or 3 encrypt/verify tries
+        # This address didn't bond (connect failed, or the encrypt/verify tries
         # failed) — drop the client, avoid the address, and let the resolver
         # hand us the panel's other RPA.
         if client is not None:

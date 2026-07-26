@@ -14,11 +14,11 @@
       },
       "pair": {
         "title": "Pair with the Truma panel",
-        "description": "Put the panel {name} into add-device mode (in the Truma InetX app, or on the panel itself), then select **Submit**. Pairing can take up to a minute.\n\nIf it fails, clear the panel's saved Bluetooth device list — its bond storage may be full — and try again. If you are **re-pairing** through a Bluetooth proxy (ESP32), also clear the proxy's stored bonds (press its **Clear BLE bonds** button), otherwise the panel rejects the new bond."
+        "description": "Put the panel {name} into add-device mode (in the Truma InetX app, or on the panel itself), then select **Submit**. Pairing can take up to a minute.\n\nIf it fails, clear the panel's saved Bluetooth device list — its bond storage may be full — and try again. If it still fails, power-cycle the panel: it then advertises a fresh Bluetooth address that pairs cleanly."
       }
     },
     "error": {
-      "pairing_failed": "Could not pair with the panel. Make sure it is in add-device mode and its Bluetooth device list has free slots. If you are re-pairing through a Bluetooth proxy, also clear the proxy's stored bonds (its **Clear BLE bonds** button), then try again."
+      "pairing_failed": "Could not pair with the panel. Make sure it is in add-device mode and its Bluetooth device list has free slots, then try again. If it keeps failing, power-cycle the panel and retry."
     },
     "abort": {
       "no_devices_found": "No Truma iNet X panels found. Make sure the panel is powered on and in Bluetooth range.",

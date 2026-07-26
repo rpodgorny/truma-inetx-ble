@@ -82,11 +82,34 @@ failed connect, or a partial connect never leaves a half-open link holding the
 proxy's connection slot (the ghost that needed a power-cycle). `async_stop`
 routes through the same helper.
 
-### 5c: Re-pair UX for the proxy stale-bond case (reason=97) [Complete]
-Onboarding strings now tell the user that when re-pairing through an ESP32 proxy
-they must also clear the proxy's stored bonds (its **Clear BLE bonds** button),
-not just the panel's list — the previously-confusing dead end. Button added to
-the proxy YAML (`truma-bt-proxy.yaml`).
+### 5c: Re-pair for the proxy stale-bond case (reason=97) [Complete]
+A re-pair looked like it needed both sides cleared: the panel's device list is
+cleared (or rolls our entry out of its ~4 slots) while the proxy still holds
+its half, so the panel rejects the new bond with `error: 97`. The old
+onboarding text told the user to press a **Clear BLE bonds** button — a lambda
+in our own proxy YAML that no stock-firmware user has. That made the
+integration unshippable.
+
+**It needs no clearing at all.** The proxy's stale bond is *per address*. The
+panel rejects the bond only on the RPA the proxy has a bond for; its next RPA
+is one the proxy has never seen, and pairing there is clean. The `avoid`
+rotation from 5d already does exactly this, so re-pairing works on stock
+firmware with no button, no custom YAML and no reflash. Verified end-to-end on
+the van twice on 2026-07-26 (deleted the HA entry, cleared the panel's list,
+deliberately left the proxy's bonds in place): rejected on the stale RPA,
+rotated, bonded on the fresh one, ~9s each time.
+
+Rejected alternative — issuing the ESPHome bluetooth-proxy `UNPAIR` request
+(stock since ESPHome 2024.3.0). The ESP applies it without a connection, but
+`bleak_esphome` gates `BleakClient.unpair()` on a live one, and **the panel
+drops the link the instant it rejects the bond** — measured at 100ms, far
+inside the request round-trip, so the call always lands on a dead connection.
+The only way through is `aioesphomeapi.bluetooth_device_unpair()` reached via
+`hass.data["esphome"]` internals: private API, not worth it when rotation
+already works. Onboarding strings now point at a panel power-cycle, which
+forces a fresh RPA, as the escalation.
+
+Checked offline by `scripts/test_pairing_rotation.py`.
 
 ### 5d: Phantom-RPA rotation [Complete — pending live re-validation]
 Observed live (2026-07-16): after pairing on one RPA, the panel keeps
